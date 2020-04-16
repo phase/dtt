@@ -1,0 +1,12 @@
+[package]
+name = "tt"
+version = "0.1.0"
+authors = ["Jadon Fowler <j@jadon.io>"]
+edition = "2018"
+
+[dependencies]
+lalrpop = { version = "0.18.1", features = ["lexer"] }
+lalrpop-util = "0.18.1"
+
+[build-dependencies]
+lalrpop = "0.18.1"

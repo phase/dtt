@@ -1,0 +1,35 @@
+use std::str::FromStr;
+use lalrpop_util::ErrorRecovery;
+use crate::*;
+
+grammar<'err>(errors: &'err mut Vec<ErrorRecovery<usize, lalrpop_util::lexer::Token<'input>, &'static str>>);
+
+pub Program: Vec<Top> = {
+    <Top*> => <>,
+}
+
+Top: Top = {
+    "check" <e:Expr> => Top::Check(e),
+    "eval" <e:Expr> => Top::Eval(e),
+    <n:Name> ":" <e:Expr> => Top::Declaration(n, e),
+    <n:Name> "=" "check" <e:Expr> => Top::DefinitionCheck(n, e),
+    <n:Name> "=" <e:Expr> => Top::Definition(n, e),
+};
+
+Expr: Rc<Expr> = {
+    "Type" <Num> => Rc::new(Expr::Universe(<>)),
+    "forall" <n:Name> ":" <t:Expr> "->" <e:Expr> => Rc::new(Expr::Pi((Variable::String(n), t, e))),
+//    <t:Expr> "->" "(" <e:Expr> ")" => Rc::new(Expr::Pi((Variable::String("_".into()), t, e))),
+    "\\" <n:Name> ":" <t:Expr> "=>" <e:Expr> => Rc::new(Expr::Lambda((Variable::String(n), t, e))),
+    "(" <e1:Expr> <e2:Expr> ")" => Rc::new(Expr::App(e1, e2)),
+    "(" <Expr> ")" => <>,
+    <Name> => Rc::new(Expr::Var(Variable::String(<>))),
+}
+
+Num: u64 = {
+    r"[0-9]+" => u64::from_str(<>).unwrap()
+};
+
+Name: String = {
+    r"[a-zA-Z_][a-zA-Z0-9_]*" => <>.to_string()
+};
