@@ -14,6 +14,7 @@ use lalrpop_util::lexer::Token;
 lalrpop_mod!(pub parser);
 
 pub enum Top {
+    Erase(Rc<Expr>),
     Check(Rc<Expr>),
     Declaration(String, Rc<Expr>),
     Definition(String, Rc<Expr>),
@@ -25,9 +26,27 @@ pub enum Top {
 pub enum Expr {
     Var(Variable),
     Universe(u64),
+    IPi(Abstraction),
     Pi(Abstraction),
+    ILambda(Abstraction),
     Lambda(Abstraction),
+    IApp(Rc<Expr>, Rc<Expr>),
     App(Rc<Expr>, Rc<Expr>),
+}
+
+impl Expr {
+    pub fn erase(&self) -> Rc<Expr> {
+        match self {
+            Expr::Var(v) => Rc::new(Expr::Var(v.clone())),
+            Expr::Universe(u) => Rc::new(Expr::Universe(u.clone())),
+            Expr::IPi((v, e1, e2)) => e2.erase(),
+            Expr::Pi((v, e1, e2)) => Rc::new(Expr::Pi((v.clone(), e1.erase(), e2.erase()))),
+            Expr::ILambda((v, e1, e2)) => e2.erase(),
+            Expr::Lambda((v, e1, e2)) => Rc::new(Expr::Lambda((v.clone(), e1.erase(), e2.erase()))),
+            Expr::IApp(e1, e2) => e1.erase(),
+            Expr::App(e1, e2) => Rc::new(Expr::App(e1.erase(), e2.erase())),
+        }
+    }
 }
 
 impl Display for Expr {
@@ -35,18 +54,25 @@ impl Display for Expr {
         match self {
             Expr::Var(x) => x.fmt(f),
             Expr::Universe(k) => write!(f, "Type {}", k),
+            Expr::IPi((x, t, e)) => {
+                match e.deref() {
+                    Expr::Var(v) => {
+                        write!(f, ".{} -> {}", t, v)
+                    }
+                    _ => write!(f, ".forall ({} : {}) -> {}", x, t, e)
+                }
+            }
             Expr::Pi((x, t, e)) => {
                 match e.deref() {
                     Expr::Var(v) => {
                         write!(f, "{} -> {}", t, v)
                     }
-                    Expr::Universe(k) => {
-                        write!(f, "{} -> Type {}", t, k)
-                    }
                     _ => write!(f, "forall ({} : {}) -> {}", x, t, e)
                 }
             }
+            Expr::ILambda((x, t, e)) => write!(f, ".\\{} : {} => {}", x, t, e),
             Expr::Lambda((x, t, e)) => write!(f, "\\{} : {} => {}", x, t, e),
+            Expr::IApp(e1, e2) => write!(f, ".({} {})", e1, e2),
             Expr::App(e1, e2) => write!(f, "({} {})", e1, e2),
         }
     }
@@ -137,8 +163,11 @@ impl TypeChecker {
                     None => e,
                 }
             }
+            Expr::IPi(a) => Rc::new(Expr::IPi(self.substitute_abstraction(&substitutions, a.clone()))),
             Expr::Pi(a) => Rc::new(Expr::Pi(self.substitute_abstraction(&substitutions, a.clone()))),
+            Expr::ILambda(a) => Rc::new(Expr::ILambda(self.substitute_abstraction(&substitutions, a.clone()))),
             Expr::Lambda(a) => Rc::new(Expr::Lambda(self.substitute_abstraction(&substitutions, a.clone()))),
+            Expr::IApp(e1, e2) => Rc::new(Expr::IApp(self.substitute(substitutions, e1.clone()), self.substitute(substitutions, e2.clone()))),
             Expr::App(e1, e2) => Rc::new(Expr::App(self.substitute(substitutions, e1.clone()), self.substitute(substitutions, e2.clone()))),
             _ => e
         }
@@ -170,11 +199,17 @@ impl TypeChecker {
                 }
             }
             Expr::Universe(k) => Rc::new(Expr::Universe(k + 1)),
-            Expr::Pi((x, t1, t2)) => {
+            Expr::Pi((x, t1, t2)) | Expr::IPi((x, t1, t2)) => {
                 let k1 = self.infer_universe(ctx, t1.clone());
                 let mut ctx = ctx.extend(x.clone(), t1.clone(), None);
                 let k2 = self.infer_universe(&mut ctx, t2.clone());
                 Rc::new(Expr::Universe(max(k1, k2)))
+            }
+            Expr::ILambda((x, t, e)) => {
+                let _ = self.infer_universe(ctx, t.clone());
+                let mut ctx = ctx.extend(x.clone(), t.clone(), None);
+                let te = self.infer_type(&mut ctx, e.clone());
+                Rc::new(Expr::IPi((x.clone(), t.clone(), te)))
             }
             Expr::Lambda((x, t, e)) => {
                 let _ = self.infer_universe(ctx, t.clone());
@@ -182,9 +217,11 @@ impl TypeChecker {
                 let te = self.infer_type(&mut ctx, e.clone());
                 Rc::new(Expr::Pi((x.clone(), t.clone(), te)))
             }
-            Expr::App(e1, e2) => {
+            Expr::App(e1, e2) | Expr::IApp(e1, e2) => {
+                // println!("{} {}", e1, e2);
                 let (x, s, t) = self.infer_pi(ctx, e1.clone());
                 let te = self.infer_type(ctx, e2.clone());
+                // println!("  {} : PI ({}: **{}**) -> {} ==? {} : **{}**", e1, x, s, t, e2, te);
                 self.check_equal(ctx, s, te);
                 let mut new = HashMap::new();
                 new.insert(x, e2.clone());
@@ -193,28 +230,28 @@ impl TypeChecker {
         }
     }
 
-    /// inverse the universe level of the type in the context
+    /// infer the universe level of the type in the context
     fn infer_universe(&mut self, ctx: &mut Context, typ: Rc<Expr>) -> u64 {
         let u = self.infer_type(ctx, typ);
         match self.normalize(ctx, u).deref() {
             Expr::Universe(k) => k.clone(),
-            e => { panic!(format!("found expr {:?} when universe was expected", e)) }
+            e => { panic!(format!("found expr {} when universe was expected", e)) }
         }
     }
 
     /// infer the type of the expression in the context, verifying that it is
     /// a Pi expression and returns the abstraction
     fn infer_pi(&mut self, ctx: &mut Context, e: Rc<Expr>) -> Abstraction {
-        let t = self.infer_type(ctx, e);
+        let t = self.infer_type(ctx, e.clone());
         match self.normalize(ctx, t).deref() {
-            Expr::Pi(a) => a.clone(),
-            e => { panic!(format!("found expr {:?} when pi was expected", e)) }
+            Expr::Pi(a) | Expr::IPi(a) => a.clone(),
+            e1 => { panic!(format!("found expr {} ==> {} when pi was expected", e, e1)) }
         }
     }
 
     fn check_equal(&mut self, ctx: &mut Context, e1: Rc<Expr>, e2: Rc<Expr>) {
         if !self.equal(ctx, e1.clone(), e2.clone()) {
-            panic!(format!("expressions {:?} and {:?} are not equal?", e1, e2))
+            panic!(format!("expressions {} and {} are not equal?", e1, e2))
         }
     }
 
@@ -250,7 +287,9 @@ impl TypeChecker {
                     _ => Rc::new(Expr::App(e1, e2))
                 }
             }
+            Expr::IPi(a) => Rc::new(Expr::IPi(self.normalize_abstraction(ctx, a))),
             Expr::Pi(a) => Rc::new(Expr::Pi(self.normalize_abstraction(ctx, a))),
+            Expr::ILambda(a) => Rc::new(Expr::ILambda(self.normalize_abstraction(ctx, a))),
             Expr::Lambda(a) => Rc::new(Expr::Lambda(self.normalize_abstraction(ctx, a))),
             _ => e
         }
@@ -271,9 +310,14 @@ impl TypeChecker {
             (Expr::App(e11, e12), Expr::App(e21, e22)) =>
                 self.equal(ctx, e11.clone(), e21.clone()) &&
                     self.equal(ctx, e12.clone(), e22.clone()),
+            (Expr::IApp(e11, e12), Expr::IApp(e21, e22)) =>
+                self.equal(ctx, e11.clone(), e21.clone()) &&
+                    self.equal(ctx, e12.clone(), e22.clone()),
             (Expr::Universe(k1), Expr::Universe(k2)) => k1 == k2,
             (Expr::Pi(a1), Expr::Pi(a2)) => self.equal_abstraction(ctx, a1, a2),
             (Expr::Lambda(a1), Expr::Lambda(a2)) => self.equal_abstraction(ctx, a1, a2),
+            (Expr::IPi(a1), Expr::IPi(a2)) => self.equal_abstraction(ctx, a1, a2),
+            (Expr::ILambda(a1), Expr::ILambda(a2)) => self.equal_abstraction(ctx, a1, a2),
             _ => false
         }
     }
@@ -293,19 +337,39 @@ fn main() {
     let mut ctx = Context::new();
     let mut checker = TypeChecker::new();
 
-    let code = "
+    let code = r"
 Ty : Type 1
 N : Type 0
 B : Type 0
 Z : N
 S : forall _: N -> N
-three = \\f : (forall _ : N -> N) => \\x : N => (f (f (f x)))
+tZ = N
+tS = forall _ : N -> N
+C = forall s: tS -> (forall _: tZ -> N)
+zero = \s : tS => \z : tZ => z
+one = \s : tS => \z : tZ => (s z)
+two = \s : tS => \z : tZ => (s (s z))
+three = \s : tS => \z : tZ => (s (s (s z)))
+four = \s : tS => \z : tZ => (s ((three s) z))
+add = \m : C => \n : C => \s : tS => \z : tZ => ((m s) ((n s) z))
+
 check (three S)
 check (three (three S))
 eval ((three (three S)) Z)
 tthree = check three
 
-BU = check \\f : Type 0 => B
+check (S (S Z))
+
+Vec : Π x : Type 0 -> (.Π l : C -> Type 0)
+append : Π T : Type 0 -> (.Π n : C -> (.Π m : C -> (Π _ : .((Vec T) n) -> (Π _ : .((Vec T) m) -> .((Vec T) ((add m) n) )))))
+tappend = check append
+VecN2 : .((Vec B) one)
+tVecN2 = check VecN2
+
+erase Vec
+erase append
+
+BU = check \f : Type 0 => B
 
 ";
     let mut errors: Vec<ErrorRecovery<usize, Token, &str>> = Vec::new();
@@ -317,6 +381,10 @@ BU = check \\f : Type 0 => B
                     Top::Check(def) => {
                         let typ = checker.infer_type(&mut ctx, def.clone());
                         println!("{} : {}", def, typ);
+                    }
+                    Top::Erase(def) => {
+                        let typ = checker.infer_type(&mut ctx, def.clone()).erase();
+                        println!("erased {} : {}\n", def, typ);
                     }
                     Top::Declaration(name, typ) => {
                         println!("{} : {}", name, typ);
